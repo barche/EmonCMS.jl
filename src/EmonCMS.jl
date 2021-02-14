@@ -196,7 +196,7 @@ end
 feedlist(ds) = load(feedsfile(ds.path))
 function getfeed(ds::EmonDataSet, name)
   feedtable = load(joinpath(ds.path, name*dbextension))
-  unit = filter(i -> i.name == "TestFeed", feedlist(ds))[1][:unit]
+  unit = filter(i -> i.name == name, feedlist(ds))[1][:unit]
   return table((time=select(feedtable, :time) .* u"s", value=select(feedtable, :value) .* uparse(unit)), pkey=:time)
 end
 
