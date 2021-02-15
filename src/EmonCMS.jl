@@ -197,13 +197,13 @@ feedlist(ds) = load(feedsfile(ds.path))
 function getfeed(ds::EmonDataSet, name)
   feedtable = load(joinpath(ds.path, name*dbextension))
   unit = filter(i -> i.name == name, feedlist(ds))[1][:unit]
-  return table((time=select(feedtable, :time) .* u"s", value=select(feedtable, :value) .* uparse(unit)), pkey=:time)
+  return table((time= unix2datetime.(select(feedtable, :time)), value=select(feedtable, :value) .* uparse(unit)), pkey=:time)
 end
 
 function integrateperperiod(feedtable, period, expectedunit = u"kW*hr")
   pertype = typeof(period)
   
-  times = ustrip.(u"s", select(feedtable, :time))
+  times = datetime2unix.(select(feedtable, :time))
   values = ustrip.(u"W", select(feedtable, :value))
 
   starttime = floor(unix2datetime(times[1]), pertype)
