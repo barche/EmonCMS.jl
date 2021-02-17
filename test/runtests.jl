@@ -68,7 +68,7 @@ end
   testfeed = getfeed(emonds, "TestFeed")
   @test length(testfeed) == length(feed) + expectednmissing-1
   @test count(ismissing, select(testfeed,:value)) == expectednmissing
-  energytable = integrateperperiod(testfeed, Second(interval))
+  energytable = energyperperiod(testfeed, Second(interval))
   energy = select(energytable, :energy)
   @test sum(skipmissing(energy)) ≈ (expectedenergy * u"J" |> u"kW*hr")
 end

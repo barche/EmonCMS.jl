@@ -28,7 +28,7 @@ Getting the daily energy usage of a feed named `HeatPump`:
 
 ```julia
 heatpumpfeed = getfeed(db, "HeadPump")
-energytable = integrateperperiod(heatpumpfeed, Day(1))
+energytable = energyperperiod(heatpumpfeed, Day(1))
 ```
 
 Both `heatpumpfeed` and `energytable` are [JuliaDB](https://juliadb.juliadata.org) tables, available for further processing in e.g. a [Pluto](https://github.com/fonsp/Pluto.jl) notebook.

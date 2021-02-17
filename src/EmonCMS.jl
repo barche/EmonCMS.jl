@@ -2,7 +2,7 @@ module EmonCMS
 
 export EmonDataSet
 export update
-export integrateperperiod
+export energyperperiod
 export feedlist
 export getfeed
 
@@ -200,7 +200,16 @@ function getfeed(ds::EmonDataSet, name)
   return table((time= unix2datetime.(select(feedtable, :time)), value=select(feedtable, :value) .* uparse(unit)), pkey=:time)
 end
 
-function integrateperperiod(feedtable, period, expectedunit = u"kW*hr")
+function _replace_missing_limited(values, allowedmissing)
+  nbmissing = count(ismissing, values)
+  if nbmissing != 0 && nbmissing/length(values) < allowedmissing
+    return replace(values, missing => zero(eltype(values)))
+  end
+
+  return values
+end
+
+function energyperperiod(feedtable, period; expectedunit = u"kW*hr", allowedmissing = 0.1)
   pertype = typeof(period)
   
   times = datetime2unix.(select(feedtable, :time))
@@ -215,7 +224,7 @@ function integrateperperiod(feedtable, period, expectedunit = u"kW*hr")
     periodend = (datetime2unix(p + period) |> Int64)
     firstidx = max(searchsortedlast(times, periodstart),1)
     lastidx = min(searchsortedfirst(times, periodend), length(times))
-    energyvalues[i] = trapz(times[firstidx:lastidx], values[firstidx:lastidx])
+    energyvalues[i] = trapz(times[firstidx:lastidx], _replace_missing_limited(values[firstidx:lastidx], allowedmissing))
   end
 
   return table((dates=daterange, energy=((energyvalues .* u"J") .|> expectedunit)), pkey=:dates)
