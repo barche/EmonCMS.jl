@@ -44,7 +44,7 @@ EmonCMS.writeconnfile(EmonCMS.Connection("https://localhost", "dummykey"), EmonC
 emonds = EmonDataSet(tdir)
 
 @testset "Feed setup" begin
-  feedstuple = (id=[2], unit=["W"], name=["TestFeed"], starttime=[5000], interval=[10])
+  feedstuple = (id=[2,3], unit=["W", "W"], name=["TestFeed", "TotalPower"], starttime=[5000,5000], interval=[10,10])
   feedstable = table(feedstuple, pkey=[:id, :name])
   save(feedstable, EmonCMS.feedsfile(emonds.path))
 end
@@ -61,6 +61,7 @@ end
   feedfile = joinpath(tdir, "TestFeed.juliadb")
   save(EmonCMS.updatefeedtable(getblock, nothing, EmonCMS.createfeedtable(), feed, starttime, endtime, interval, "TestFeed"), feedfile)
   feedtable = load(feedfile)
+  save(feedtable, joinpath(tdir, "TotalPower.juliadb"))
   push!(feed, [(endtime+interval)*1000,10])
   feedtable2 = EmonCMS.updatefeedtable(getblock, nothing, feedtable, feed, starttime, endtime+interval, interval, "TestFeed")
   @test all(select(feedtable,:time) .== select(feedtable2,:time)[1:end-1])
@@ -71,4 +72,25 @@ end
   energytable = energyperperiod(testfeed, Second(interval))
   energy = select(energytable, :energy)
   @test sum(skipmissing(energy)) ≈ (expectedenergy * u"J" |> u"kW*hr")
+end
+
+@testset "Postprocessing" begin
+  names, energies, counts = energysummary(emonds; years=[1970], period=Day(1), totalpowerfeeds=["TotalPower", "TotalPower"])
+  @test length(names) == 2
+  @test names[2] == "TestFeed"
+  @test names[1] == "Unknown"
+  @test all(skipmissing(energies[:,1]) .== skipmissing(energies[:,2]))
+end
+
+@testset "Export" begin
+  csvdir = mktempdir()
+  exportcsv(emonds, csvdir)
+  for tname in select(feedlist(emonds), :name)
+    ref = EmonCMS.loadfeed(emonds,tname)
+    imported = EmonCMS.importfeed(joinpath(csvdir, "$tname.csv"))
+    @test all(select(ref,:time) .== select(imported,:time))
+    @test all(skipmissing(select(ref,:value) .≈ select(imported,:value)))
+    @test count(ismissing, select(ref,:value)) == count(ismissing, select(imported,:value))
+  end
+  @test feedlist(emonds) == loadtable(joinpath(csvdir,"feedlist.csv"))
 end

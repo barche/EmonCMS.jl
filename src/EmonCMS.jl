@@ -5,6 +5,9 @@ export update
 export energyperperiod
 export feedlist
 export getfeed
+export yearlyaverage
+export energysummary
+export exportcsv
 
 using Unitful
 import HTTP
@@ -14,6 +17,7 @@ using JuliaDB
 using Dates
 using ProgressMeter
 using Trapz
+using DelimitedFiles
 
 struct Connection
   serveraddress::URI
@@ -61,6 +65,16 @@ end
 connectionfile(base) = joinpath(base,"connection.json")
 feedsfile(base) = joinpath(base,"feeds"*dbextension)
 
+
+"""
+  EmonDataSet(path)
+
+Load the dataset at the given path
+
+  EmonDataSet(path, serveraddress, apikey)
+
+Construct a new dataset in the existing directory at `path`, connecting to `serveraddress` using read-only EmonCMS API key `apikey`
+"""
 struct EmonDataSet
   path::String
   connection::Connection
@@ -148,8 +162,16 @@ function writeconnfile(connection, filename)
     println(filestream)
   end
 end
+"""
+  update(ds)
 
-function update(ds::EmonDataSet; endtime=now(), starttime=nothing, feeds=[])
+Update the EmonDataSet `ds` with the latest available data on the emonPi.
+
+  update(ds; feeds=[id1, id2, ...])
+
+First call to update on EmonDataSet `ds` , with a list of integer feed IDs to store in the dataset.
+"""
+function update(ds::EmonDataSet; feeds=[])
   connfile = connectionfile(ds.path)
   if !isfile(connfile)
     writeconnfile(ds.connection, connfile)
@@ -193,9 +215,22 @@ function update(ds::EmonDataSet; endtime=now(), starttime=nothing, feeds=[])
   return
 end
 
+"""
+  feedlist(ds)
+
+Get the table of stored feeds in `ds`.
+"""
 feedlist(ds) = load(feedsfile(ds.path))
+
+loadfeed(ds,name) = load(joinpath(ds.path, name*dbextension))
+
+"""
+  getfeed(ds, name)
+
+Get the values of a given feed. The result is a table with columns `time` and `value`.
+"""
 function getfeed(ds::EmonDataSet, name)
-  feedtable = load(joinpath(ds.path, name*dbextension))
+  feedtable = loadfeed(ds, name)
   unit = filter(i -> i.name == name, feedlist(ds))[1][:unit]
   return table((time= unix2datetime.(select(feedtable, :time)), value=select(feedtable, :value) .* uparse(unit)), pkey=:time)
 end
@@ -209,7 +244,26 @@ function _replace_missing_limited(values, allowedmissing)
   return values
 end
 
-function energyperperiod(feedtable, period; expectedunit = u"kW*hr", allowedmissing = 0.1)
+"""
+  energyperperiod(feedtable, period)
+
+For the power data in `feedtable`, calculate the energy per given periods, returning the result as a table with columns `date` and `energy`
+
+Example:
+
+To get the monthly totals of feed `HeatPump` do:
+```
+feedtable = getfeed(ds, "HeatPump")
+energyperperiod(feedtable, Month(1))
+```
+
+`Month` comes from the `Dates` package.
+
+* The keyword argument `energyunit` allows you to set the unit of the output (`kW hr` by default)
+* The keyword argument `allowedmissing` indicates the fraction of missing values that is allowed to be replaced by zero. If this fraction is exceeded for a given period, the period value will be `missing`.
+
+"""
+function energyperperiod(feedtable, period; energyunit = u"kW*hr", allowedmissing = 0.1)
   pertype = typeof(period)
   
   times = datetime2unix.(select(feedtable, :time))
@@ -227,7 +281,109 @@ function energyperperiod(feedtable, period; expectedunit = u"kW*hr", allowedmiss
     energyvalues[i] = trapz(times[firstidx:lastidx], _replace_missing_limited(values[firstidx:lastidx], allowedmissing))
   end
 
-  return table((dates=daterange, energy=((energyvalues .* u"J") .|> expectedunit)), pkey=:dates)
+  return table((date=daterange, energy=((energyvalues .* u"J") .|> energyunit)), pkey=:date)
+end
+
+"""
+  yearlyaverage(feed, period, years)
+
+Return the average energy used for each period (e.g. monthly) over the given range of years, for the given feed.
+
+The returned value is a tuple containing the averaged values and the number of times this period was counted.
+"""
+function yearlyaverage(feed, period, years=[2018,2019,2020])
+	nbperiods = length(DateTime(2017):period:DateTime(2018))-1
+	result = fill(0.0*u"kW*hr", nbperiods)
+	counts = zeros(Int, nbperiods)
+	for y in years
+		yearintegral = energyperperiod(filter(f -> (year(f.time) == y && !(month(f.time) == 2 && day(f.time) == 29)), feed),period)
+		values = select(yearintegral, :energy)
+		for i in eachindex(skipmissing(values))
+      if i > nbperiods
+        break
+      end
+			counts[i] += 1
+			result[i] += values[i]
+		end
+	end
+	return replace(result ./ counts, NaN*u"kW*hr" => missing), counts
+end
+
+"""
+  energysummary(ds)
+
+Summarize energy usage over a number of years for a set of feeds, adding a feed named "Unknown" by subtracting all other feeds from a set of feeds that give the total power.
+
+Example:
+
+```
+names, energies, counts = energysummary(ds; years=[2018,2019,2020], totalpowerfeeds = ["L1"])
+```
+
+The `years` argument lists the years over which to average, the `totalpowerfeeds` argument gives a list of feeds that when added together give the total power (e.g. measurements on each incoming phase).
+
+This returns:
+* `names`: The names of the considered feeds (all feeds by default, or the names in the array passed to the `feeds` keyword argument)
+* `energies`: 2D array, with each column `i` the averaged energy for feed `i` in `names`. Rows are the period numbers (months by default, change with keyword argument `period`)
+* `counts`: Number of times each period was non-missing for each feed.
+"""
+function energysummary(ds; period=Month(1), years=[2018,2019,2020], totalpowerfeeds = ["L1_in", "L2_in", "L3_in"], feeds=select(feedlist(ds),:name))
+  # Collect averages per period for each feed
+  energydict = Dict()
+	for feedname in feeds
+		energies,counts = yearlyaverage(getfeed(ds, feedname), period, years)
+		energydict[feedname] = (energies=energies,counts=counts)
+	end
+	
+  # Compute the total energy
+	totalenergy = energydict[totalpowerfeeds[1]].energies
+  for feedname in totalpowerfeeds[2:end]
+    totalenergy .+=  energydict[feedname].energies
+  end
+
+  # Store the energy per period in a 2D array
+	nbpers = length(totalenergy)
+	wantedkeys = setdiff(feeds, totalpowerfeeds)
+	energies = zeros(Union{Missing,typeof(0.0u"kW*hr")},nbpers,length(wantedkeys)+1)
+	counts = zeros(Int, size(energies))
+	for (i,name) in enumerate(wantedkeys)
+		(h,c) = energydict[name]
+		energies[:,i+1] .= h
+		counts[:,i+1] .= c
+	end
+	energies[:,1] .= totalenergy .- reshape(sum(energies[:,2:end];dims=2),nbpers)
+	counts[:,1] .= energydict[totalpowerfeeds[1]].counts
+	pushfirst!(wantedkeys, "Unknown")
+	return reshape(wantedkeys,1,length(wantedkeys)), energies, counts
+end
+
+function exporttable(filename, table)
+  if isfile(filename)
+    throw(ErrorException("Refusing to overwrite $filename"))
+  end
+  open(filename,"w") do f
+    println(f,join(colnames(table),','))
+    writedlm(f,table,',')
+  end
+end
+
+function importfeed(filename)
+  return loadtable(filename; nastrings=["missing"], indexcols=[:time])
+end
+
+"""
+  exportcsv(ds, path)
+
+Export all tables as CSV files in directory `path`
+"""
+function exportcsv(ds, path)
+  if !isdir(path)
+    throw(ErrorException("Export path $path must be an existing directory"))
+  end
+  exporttable(joinpath(path, "feedlist.csv"), feedlist(ds))
+  for feedname in select(feedlist(ds),:name)
+    exporttable(joinpath(path, "$feedname.csv"), loadfeed(ds, feedname))
+  end
 end
 
 end # module
