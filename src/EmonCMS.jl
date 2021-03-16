@@ -5,7 +5,7 @@ export update
 export energyperperiod
 export feedlist
 export getfeed
-export yearlyaverage
+export yearlysummary
 export energysummary
 export exportcsv
 
@@ -18,6 +18,7 @@ using Dates
 using ProgressMeter
 using Trapz
 using DelimitedFiles
+using Statistics
 
 struct Connection
   serveraddress::URI
@@ -285,28 +286,37 @@ function energyperperiod(feedtable, period; energyunit = u"kW*hr", allowedmissin
 end
 
 """
-  yearlyaverage(feed, period, years)
+  yearlysummary(feed, period, years)
 
 Return the average energy used for each period (e.g. monthly) over the given range of years, for the given feed.
 
 The returned value is a tuple containing the averaged values and the number of times this period was counted.
 """
-function yearlyaverage(feed, period, years=[2018,2019,2020])
-	nbperiods = length(DateTime(2017):period:DateTime(2018))-1
-	result = fill(0.0*u"kW*hr", nbperiods)
-	counts = zeros(Int, nbperiods)
-	for y in years
-		yearintegral = energyperperiod(filter(f -> (year(f.time) == y && !(month(f.time) == 2 && day(f.time) == 29)), feed),period)
-		values = select(yearintegral, :energy)
-		for i in eachindex(skipmissing(values))
+function yearlysummary(reduction, feed, period, years=[2018,2019,2020]; allowedmissing = 0.1)
+  nbperiods = length(DateTime(2017):period:DateTime(2018))-1
+  yearlytable = Array{Union{Missing,typeof(0.0u"kW*hr")}}(missing, nbperiods, length(years))
+  result = zeros(Union{Missing,typeof(0.0u"kW*hr")}, nbperiods)
+  for (yearidx,y) in enumerate(years)
+    yearintegral = energyperperiod(filter(f -> (year(f.time) == y), feed), period; allowedmissing=allowedmissing)
+    yearintegral = filter(f -> !(month(f.date) == 2 && day(f.date) == 29), yearintegral)
+    values = select(yearintegral, :energy)
+    for i in eachindex(skipmissing(values))
       if i > nbperiods
         break
       end
-			counts[i] += 1
-			result[i] += values[i]
-		end
-	end
-	return replace(result ./ counts, NaN*u"kW*hr" => missing), counts
+      yearlytable[i,yearidx] = values[i]
+    end
+  end
+  counts = length(years) .- reshape(count(ismissing, yearlytable; dims=2) , nbperiods)
+  for i in 1:nbperiods
+    yearvals = yearlytable[i,:]
+    if count(ismissing, yearvals) == length(yearvals)
+      result[i] = missing
+    else
+      result[i] = reduction(skipmissing(yearvals))
+    end
+  end
+  return result, counts
 end
 
 """
@@ -327,11 +337,11 @@ This returns:
 * `energies`: 2D array, with each column `i` the averaged energy for feed `i` in `names`. Rows are the period numbers (months by default, change with keyword argument `period`)
 * `counts`: Number of times each period was non-missing for each feed.
 """
-function energysummary(ds; period=Month(1), years=[2018,2019,2020], totalpowerfeeds = ["L1_in", "L2_in", "L3_in"], feeds=select(feedlist(ds),:name))
+function energysummary(ds; period=Month(1), years=[2018,2019,2020], totalpowerfeeds = ["L1_in", "L2_in", "L3_in"], feeds=select(feedlist(ds),:name), allowedmissing = 0.1, reduction=mean)
   # Collect averages per period for each feed
   energydict = Dict()
 	for feedname in feeds
-		energies,counts = yearlyaverage(getfeed(ds, feedname), period, years)
+		energies,counts = yearlysummary(reduction, getfeed(ds, feedname), period, years; allowedmissing=allowedmissing)
 		energydict[feedname] = (energies=energies,counts=counts)
 	end
 	
